@@ -37,9 +37,9 @@ def create_app():
 
     return app
 
-
+app = create_app()
 if __name__ == "__main__":
-    app = create_app()
+    import os
     print("""
 Backend running:
   Health:  GET  http://localhost:5000/api/health
@@ -48,6 +48,5 @@ Backend running:
   Tx:      GET/POST http://localhost:5000/api/transactions
   Plan:    POST http://localhost:5000/api/plans/generate
 """)
-    import os
-port = int(os.environ.get('PORT', 5000))
-app.run(host="0.0.0.0", port=port, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
