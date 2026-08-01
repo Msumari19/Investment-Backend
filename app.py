@@ -14,7 +14,9 @@ def create_app():
 
     db.init_app(app)
     jwt.init_app(app)
-    CORS(app)  # tighten origins before deploying publicly
+    # Only the origins listed in Config.CORS_ORIGINS (via CORS_ORIGINS env var)
+    # may make cross-origin requests, and only to /api/* routes.
+    CORS(app, resources={r"/api/*": {"origins": app.config["CORS_ORIGINS"]}})
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(tx_bp)
