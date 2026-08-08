@@ -6,6 +6,7 @@ from extensions import db, jwt
 from auth import auth_bp
 from transactions import tx_bp
 from plans import plans_bp
+from categories import cat_bp
 
 
 def create_app():
@@ -21,6 +22,7 @@ def create_app():
     app.register_blueprint(auth_bp)
     app.register_blueprint(tx_bp)
     app.register_blueprint(plans_bp)
+    app.register_blueprint(cat_bp)
 
     @app.route("/api/health")
     def health():
@@ -48,6 +50,7 @@ Backend running:
   Auth:    POST http://localhost:5000/api/auth/register  {email, password}
            POST http://localhost:5000/api/auth/login     {email, password}
   Tx:      GET/POST http://localhost:5000/api/transactions
+  Cat:     GET/POST http://localhost:5000/api/categories
   Plan:    POST http://localhost:5000/api/plans/generate
 """)
     port = int(os.environ.get('PORT', 5000))
