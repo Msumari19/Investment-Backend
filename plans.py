@@ -8,7 +8,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 
 from extensions import db
 from models import Transaction, Holding, PlanSnapshot, PlanProfile, Debt, Category
-from logic import suggest_investment_plan, PRODUCT_RULES
+from logic import suggest_investment_plan, PRODUCT_RULES, CONFIG_VERSION
 
 plans_bp = Blueprint("plans", __name__, url_prefix="/api/plans")
 
@@ -339,6 +339,66 @@ def _months_to_close(deficit, monthly):
     return ceil(deficit / monthly)
 
 
+def _build_result_no_income(expenses, start, end):
+    """
+    The shape suggest_investment_plan() would return for an empty ledger, which
+    it cannot produce itself because it rejects zero income. Mirrors the
+    engine's schema exactly so the Plan page needs no special case.
+    """
+    expenses = int(expenses or 0)
+    if expenses > 0:
+        detail = (
+            f"TZS {expenses:,} of expenses are recorded for this period but no "
+            "income yet. Add your income on the dashboard to see a plan."
+        )
+    else:
+        detail = (
+            "No income or expenses recorded for this period yet. Add a few "
+            "transactions on the dashboard, then generate the plan again."
+        )
+
+    return {
+        "currency": "TZS",
+        "config_version": CONFIG_VERSION,
+        "status": "no_ledger_data",
+        "risk_profile": None,
+        "savings_tier": None,
+        "net_monthly_savings_tzs": -expenses,
+        "recommended_monthly_savings_tzs": 0,
+        "savings_rate_pct": 0.0,
+        "emergency_fund": {
+            "status": "unknown",
+            "target_months": 0,
+            "target_months_reasons": [],
+            "target_tzs": 0,
+            "current_balance_tzs": 0,
+            "deficit_tzs": 0,
+            "surplus_tzs": 0,
+        },
+        "emergency_contribution": {
+            "instrument": None,
+            "monthly_amount_tzs": 0,
+            "percentage_of_total_savings": 0.0,
+        },
+        "debt_repayment": {"monthly_amount_tzs": 0, "blocking_debts": []},
+        "investable_amount_tzs": 0,
+        "allocations": [],
+        "pending_accumulation_tzs": {},
+        "messages": [],
+        "gate": {
+            "level": 0,
+            "key": "no_ledger_data",
+            "headline": "Nothing to plan with yet",
+            "detail": detail,
+            "months_until_investing": None,
+            "investable_now_tzs": 0,
+            "reachable_products": [],
+            "next_step": "Record this month's income to get started.",
+        },
+        "period": {"start": start.isoformat(), "end": end.isoformat()},
+    }
+
+
 def _build_gate(result):
     """
     Classify why the plan looks the way it does, so an empty allocations table
@@ -528,6 +588,17 @@ def generate_plan():
         "pending_accumulation": data.get("pending_accumulation", {}),
         "debts": debts,
     }
+
+    if plan_input["monthly_income"] <= 0:
+        # An empty ledger is the normal starting state, not an error. The
+        # engine refuses zero income, so answer before calling it.
+        result = _build_result_no_income(plan_input["monthly_expenses"], start, end)
+        snapshot = PlanSnapshot(
+            user_id=user_id, input_json=plan_input, result_json=result
+        )
+        db.session.add(snapshot)
+        db.session.commit()
+        return jsonify(snapshot.to_dict()), 200
 
     try:
         result = suggest_investment_plan(**plan_input)
