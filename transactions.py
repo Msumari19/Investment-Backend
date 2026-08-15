@@ -105,7 +105,12 @@ def update_transaction(tx_id):
             return jsonify({"error": "date must be YYYY-MM-DD"}), 400
         txn.date = parsed
     if "category_id" in data:
-        txn.category_id = data["category_id"]
+        category_id = data["category_id"]
+        if category_id is not None:
+            category = Category.query.filter_by(id=category_id, user_id=user_id).first()
+            if not category:
+                return jsonify({"error": "Unknown category_id"}), 400
+        txn.category_id = category_id
     if "note" in data:
         txn.note = data["note"]
 
