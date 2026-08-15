@@ -1,5 +1,6 @@
 from datetime import date
 from calendar import monthrange
+from math import ceil
 from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, request, jsonify
@@ -7,7 +8,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 
 from extensions import db
 from models import Transaction, Holding, PlanSnapshot, PlanProfile, Debt, Category
-from logic import suggest_investment_plan
+from logic import suggest_investment_plan, PRODUCT_RULES
 
 plans_bp = Blueprint("plans", __name__, url_prefix="/api/plans")
 
@@ -294,6 +295,152 @@ def delete_debt(debt_id):
 
 
 # ---------------------------------------------------------------------------
+# GATE NARRATIVE
+#
+# logic.py answers "what should happen". This layer answers "why is that all
+# I got, and what changes it". It reads the engine's output and derives no
+# figures of its own, so the two can never disagree.
+# ---------------------------------------------------------------------------
+
+
+def _entry_thresholds():
+    """Product minimums that are actually reachable, cheapest first."""
+    rows = [
+        (rules["minimum_initial_tzs"] or 0, rules["instrument"])
+        for rules in PRODUCT_RULES.values()
+        if not rules["availability_required"]
+    ]
+    return sorted(rows)
+
+
+def _reachable_products(investable):
+    return [
+        instrument
+        for minimum, instrument in _entry_thresholds()
+        if minimum <= investable
+    ]
+
+
+def _next_threshold(investable):
+    """The cheapest product still out of reach, and what it costs to unlock."""
+    for minimum, instrument in _entry_thresholds():
+        if minimum > investable:
+            return {
+                "instrument": instrument,
+                "threshold_tzs": minimum,
+                "shortfall_tzs": minimum - investable,
+            }
+    return None
+
+
+def _months_to_close(deficit, monthly):
+    if monthly <= 0:
+        return None
+    return ceil(deficit / monthly)
+
+
+def _build_gate(result):
+    """
+    Classify why the plan looks the way it does, so an empty allocations table
+    reads as an explanation rather than a blank panel.
+    """
+    status = result["status"]
+    investable = result["investable_amount_tzs"]
+    emergency = result["emergency_fund"]
+    contribution = result["emergency_contribution"]["monthly_amount_tzs"]
+
+    if status == "cash_flow_deficit":
+        return {
+            "level": 0,
+            "key": "no_surplus",
+            "headline": "There is nothing left to allocate",
+            "detail": (
+                "Expenses match or exceed income this month, so no savings or "
+                "investment plan can be built yet. Closing that gap is the "
+                "first move."
+            ),
+            "months_until_investing": None,
+            "investable_now_tzs": 0,
+            "reachable_products": [],
+            "next_step": None,
+        }
+
+    if status == "debt_repayment_priority":
+        blocking = result["debt_repayment"]["blocking_debts"]
+        monthly = result["debt_repayment"]["monthly_amount_tzs"]
+        owed = sum(d["balance_tzs"] for d in blocking)
+        return {
+            "level": 1,
+            "key": "debt_first",
+            "headline": "High-interest debt comes before investing",
+            "detail": (
+                f"TZS {owed:,} across {len(blocking)} debt(s) costs more in "
+                "interest than any sleeve here is expected to return. Every "
+                "shilling beyond the cash buffer goes there first."
+            ),
+            "months_until_investing": _months_to_close(owed, monthly),
+            "investable_now_tzs": 0,
+            "reachable_products": [],
+            "next_step": "Clear the highest-rate debt first.",
+        }
+
+    if investable <= 0:
+        months = _months_to_close(emergency["deficit_tzs"], contribution)
+        return {
+            "level": 2,
+            "key": "buffer_first",
+            "headline": "Building your safety buffer first",
+            "detail": (
+                f"The whole surplus of TZS {contribution:,} is going into your "
+                f"emergency fund, which is TZS {emergency['deficit_tzs']:,} "
+                f"short of a {emergency['target_months']}-month target. "
+                "Investing starts once that reserve is in place."
+            ),
+            "months_until_investing": months,
+            "investable_now_tzs": 0,
+            "reachable_products": [],
+            "next_step": (
+                f"About {months} more month(s) at this rate."
+                if months else None
+            ),
+        }
+
+    reachable = _reachable_products(investable)
+    upcoming = _next_threshold(investable)
+
+    if upcoming and len(reachable) < len(_entry_thresholds()):
+        return {
+            "level": 3,
+            "key": "narrow_menu",
+            "headline": f"TZS {investable:,} is investable this month",
+            "detail": (
+                f"{len(reachable)} product(s) are open to you at this amount. "
+                f"{upcoming['instrument']} needs TZS "
+                f"{upcoming['threshold_tzs']:,} to enter, so contributions "
+                "toward it accumulate until they clear that bar."
+            ),
+            "months_until_investing": 0,
+            "investable_now_tzs": investable,
+            "reachable_products": reachable,
+            "next_step": (
+                f"TZS {upcoming['shortfall_tzs']:,} more per month unlocks "
+                f"{upcoming['instrument']}."
+            ),
+        }
+
+    return {
+        "level": 4,
+        "key": "full_portfolio",
+        "headline": f"TZS {investable:,} is investable this month",
+        "detail": "Every product in this portfolio is open to you at this amount.",
+        "months_until_investing": 0,
+        "investable_now_tzs": investable,
+        "reachable_products": reachable,
+        "next_step": None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # PLAN GENERATION
 # ---------------------------------------------------------------------------
 
@@ -386,6 +533,10 @@ def generate_plan():
         result = suggest_investment_plan(**plan_input)
     except (TypeError, ValueError, KeyError) as e:
         return jsonify({"error": str(e), "type": type(e).__name__}), 400
+
+    # Why the plan looks the way it does -- derived from the engine's output,
+    # never recomputed, so the narrative cannot drift from the numbers.
+    result["gate"] = _build_gate(result)
 
     # Record where each input came from, so the Plan page can show whether a
     # figure was typed, derived from the ledger, or overridden for this call.
